@@ -1,5 +1,5 @@
 :root {
-  font-family: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   line-height: 1.5;
   font-weight: 400;
   color: #f5f7ff;
@@ -20,9 +20,11 @@ body {
   margin: 0;
   min-height: 100vh;
   background: radial-gradient(circle at top, #132138, #060911 55%);
-  display: flex;
-  justify-content: center;
-  padding: 2.5rem;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
 }
 
 a {
@@ -35,8 +37,4 @@ a:hover {
 
 button {
   font: inherit;
-}
-
-#root {
-  width: min(1200px, 100%);
 }
