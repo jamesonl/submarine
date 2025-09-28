@@ -1423,6 +1423,20 @@ function App() {
     return ports.filter((port) => supportedDestinations.has(port.id))
   }, [origin])
 
+  const totalCrewUnits = useMemo(() => crewState.reduce((sum, member) => sum + member.units, 0), [crewState])
+
+  const aggregateTeamStress = useMemo(() => {
+    const values = crewState.map((member) => crewMetrics[member.id]?.stress ?? 0)
+    if (!values.length) return 0
+    return values.reduce((sum, value) => sum + value, 0) / values.length
+  }, [crewMetrics, crewState])
+
+  useEffect(() => {
+    setPeakTeamStress((prev) => Math.max(prev, aggregateTeamStress))
+  }, [aggregateTeamStress])
+
+  const teamStressGrade = useMemo(() => describeStressLevel(aggregateTeamStress), [aggregateTeamStress])
+
   useEffect(() => {
     latestTelemetryRef.current = {
       progress,
@@ -1913,20 +1927,6 @@ function App() {
     [currentRoute, progress, pushLogEntry, scheduleLogEntry, adjustCrewStress, buildStressNotes],
   )
 
-  const totalCrewUnits = useMemo(() => crewState.reduce((sum, member) => sum + member.units, 0), [crewState])
-
-  const aggregateTeamStress = useMemo(() => {
-    const values = crewState.map((member) => crewMetrics[member.id]?.stress ?? 0)
-    if (!values.length) return 0
-    return values.reduce((sum, value) => sum + value, 0) / values.length
-  }, [crewMetrics, crewState])
-
-  useEffect(() => {
-    setPeakTeamStress((prev) => Math.max(prev, aggregateTeamStress))
-  }, [aggregateTeamStress])
-
-  const teamStressGrade = useMemo(() => describeStressLevel(aggregateTeamStress), [aggregateTeamStress])
-
   const currentRouteDistanceNm = useMemo(() => {
     if (!currentRoute) return 0
     return computeRouteDistanceNauticalMiles(currentRoute.path)
@@ -1992,6 +1992,8 @@ function App() {
     }
   }, [isRunning, obstacles, progress, helmState.lateralOffset, triggerMissionFailure])
 
+  const headingLabel = useMemo(() => formatHeadingLabel(helmState.headingDeg), [helmState.headingDeg])
+
   useEffect(() => {
     if (!isRunning || missionFailureRef.current) return
     if (aggregateTeamStress < 75) return
@@ -2020,8 +2022,6 @@ function App() {
     const value = baseDepth + wave + obstacleLoad + stressEffect + milestoneRelief
     return Math.round(clamp(value, 120, 360))
   }, [currentRoute, progress, obstacles, aggregateTeamStress, triggeredMilestones])
-
-  const headingLabel = useMemo(() => formatHeadingLabel(helmState.headingDeg), [helmState.headingDeg])
 
   const driftLabel = useMemo(() => {
     const magnitude = Math.abs(helmState.lateralOffset)
