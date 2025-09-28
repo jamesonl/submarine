@@ -503,6 +503,52 @@ body {
   align-items: stretch;
 }
 
+.mission-complete-panel {
+  background: rgba(8, 22, 44, 0.92);
+  border: 1px solid rgba(94, 146, 231, 0.45);
+  border-radius: 20px;
+  padding: 1rem;
+  display: grid;
+  gap: 0.55rem;
+  min-width: 220px;
+  max-width: 260px;
+  flex: 0 0 240px;
+  box-shadow: 0 8px 18px rgba(8, 18, 36, 0.45);
+}
+
+.mission-complete-panel__status,
+.mission-complete-panel__review {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid rgba(114, 165, 255, 0.5);
+  background: linear-gradient(135deg, rgba(13, 36, 74, 0.95), rgba(18, 54, 92, 0.95));
+  color: #f5f8ff;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.mission-complete-panel__status {
+  cursor: default;
+}
+
+.mission-complete-panel__review {
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.mission-complete-panel__review:hover {
+  background: linear-gradient(135deg, rgba(20, 58, 104, 0.95), rgba(30, 78, 126, 0.95));
+  transform: translateY(-1px);
+}
+
+.mission-complete-panel__story-status {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgba(198, 212, 245, 0.8);
+}
+
 .route-selector {
   background: rgba(7, 21, 36, 0.92);
   border: 1px solid rgba(65, 110, 199, 0.35);
@@ -817,10 +863,34 @@ body {
   flex: 0 0 auto;
 }
 
-.ship-log h2 {
+.ship-log__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.ship-log__header h2 {
   margin: 0;
   font-size: 1.1rem;
   letter-spacing: 0.03em;
+}
+
+.ship-log__header button {
+  padding: 0.45rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid rgba(88, 135, 214, 0.5);
+  background: rgba(9, 24, 46, 0.92);
+  color: #f4f7ff;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.ship-log__header button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .ship-log__empty {
@@ -869,6 +939,184 @@ body {
   gap: 0.3rem;
   font-size: 0.85rem;
   color: rgba(210, 226, 255, 0.88);
+}
+
+.ship-log-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 10, 22, 0.9);
+  backdrop-filter: blur(6px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 3rem 2rem;
+  z-index: 40;
+  overflow-y: auto;
+}
+
+.ship-log-overlay__content {
+  background: rgba(6, 18, 36, 0.96);
+  border-radius: 24px;
+  border: 1px solid rgba(94, 143, 232, 0.45);
+  width: min(960px, 100%);
+  display: grid;
+  gap: 1.5rem;
+  padding: 2rem;
+  box-shadow: 0 24px 64px rgba(4, 12, 28, 0.6);
+}
+
+.ship-log-overlay__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.25rem;
+  align-items: center;
+}
+
+.ship-log-overlay__header h2 {
+  margin: 0;
+  font-size: 1.35rem;
+  letter-spacing: 0.04em;
+}
+
+.ship-log-overlay__header p {
+  margin: 0.4rem 0 0;
+  color: rgba(196, 214, 249, 0.78);
+  font-size: 0.9rem;
+}
+
+.ship-log-overlay__actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.ship-log-overlay__actions button {
+  padding: 0.55rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid rgba(118, 172, 255, 0.55);
+  background: linear-gradient(135deg, rgba(18, 52, 94, 0.98), rgba(26, 68, 120, 0.98));
+  color: #f2f6ff;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  cursor: pointer;
+}
+
+.ship-log-overlay__actions button:last-child {
+  background: rgba(12, 32, 60, 0.95);
+}
+
+.ship-log-overlay__story,
+.ship-log-overlay__timeline {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.ship-log-overlay__story h3,
+.ship-log-overlay__timeline h3 {
+  margin: 0;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(205, 219, 252, 0.9);
+}
+
+.ship-log-overlay__story p {
+  margin: 0;
+  line-height: 1.5;
+  color: rgba(210, 225, 255, 0.9);
+}
+
+.ship-log-overlay__status {
+  margin: 0;
+  color: rgba(195, 214, 249, 0.82);
+  font-style: italic;
+}
+
+.ship-log-overlay__status--error {
+  color: #ffb8b3;
+}
+
+.ship-log-overlay__timeline ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+
+.ship-log-overlay__entry {
+  background: rgba(10, 28, 54, 0.7);
+  border: 1px solid rgba(105, 152, 233, 0.4);
+  border-radius: 16px;
+  padding: 1rem 1.2rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.ship-log-overlay__entry header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: baseline;
+}
+
+.ship-log-overlay__entry-time {
+  font-size: 0.78rem;
+  color: rgba(184, 206, 244, 0.75);
+}
+
+.ship-log-overlay__entry-author {
+  font-weight: 600;
+  color: #f4f8ff;
+}
+
+.ship-log-overlay__entry-role {
+  font-size: 0.78rem;
+  color: rgba(194, 212, 245, 0.78);
+}
+
+.ship-log-overlay__entry-type {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(40, 90, 160, 0.35);
+  color: rgba(214, 228, 255, 0.85);
+}
+
+.ship-log-overlay__entry-type--system {
+  background: rgba(120, 160, 255, 0.25);
+}
+
+.ship-log-overlay__entry-type--crew {
+  background: rgba(111, 198, 255, 0.25);
+}
+
+.ship-log-overlay__entry-type--reflection {
+  background: rgba(255, 183, 120, 0.25);
+}
+
+.ship-log-overlay__entry p {
+  margin: 0;
+  color: rgba(209, 225, 255, 0.9);
+}
+
+.ship-log-overlay__entry ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.3rem;
+  color: rgba(212, 226, 255, 0.9);
+}
+
+.ship-log-overlay__conversation {
+  color: rgba(204, 219, 250, 0.9);
+}
+
+.ship-log-overlay__conversation summary {
+  cursor: pointer;
+  font-weight: 600;
 }
 
 .map-panel {
@@ -1375,6 +1623,12 @@ body {
 
   .top-controls {
     flex-direction: column;
+  }
+
+  .mission-complete-panel {
+    width: 100%;
+    max-width: none;
+    flex: 1 1 auto;
   }
 
   .mission-controls {
