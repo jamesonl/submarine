@@ -8,7 +8,11 @@ import { requestCrewThought } from './services/openaiResponses.js'
 
 const MAP_WIDTH = 1280
 const MAP_HEIGHT = 720
-const TIME_SCALE = Number(import.meta.env.VITE_SIMULATION_TIME_SCALE ?? 1)
+const DEFAULT_TIME_SCALE = Number(import.meta.env.VITE_SIMULATION_TIME_SCALE ?? 1)
+const TIME_SCALE_MIN = 0.5
+const TIME_SCALE_MAX = 8
+const TIME_SCALE_OPTIONS = [0.5, 1, 2, 4, 6, 8]
+const MAX_LATERAL_OFFSET = 38
 
 const SIMULATION_MINUTES_PER_MISSION_MINUTE = 120
 const SHIFT_LENGTH_HOURS = 6
@@ -74,11 +78,13 @@ const HEARTBEAT_TASKS = [
       const watchSummary = metrics
         ? `${metrics.awakeUnits} analysts on watch, ${metrics.restingUnits} recovering.`
         : 'Balancing analyst rotations.'
+      const headingNote = describeHeadingForThought(telemetry)
       return [
         'Refreshing maritime intelligence overlays with fresh satellite passes.',
         `Monitoring corridor at ${(telemetry.progress * 100).toFixed(0)}% completion.`,
+        headingNote,
         watchSummary,
-      ]
+      ].filter(Boolean)
     },
   },
   {
@@ -90,11 +96,13 @@ const HEARTBEAT_TASKS = [
     buildThoughts: ({ telemetry, metrics }) => {
       const efficiency = metrics ? Math.round(metrics.efficiency * 100) : 100
       const rest = metrics && metrics.restingUnits > 0 ? `${metrics.restingUnits} officers off-shift.` : 'Command deck fully engaged.'
+      const headingNote = describeHeadingForThought(telemetry)
       return [
         `Reviewing bridge status at T+${formatTime(telemetry.elapsedMs)}.`,
         `Mission efficiency projected at ${efficiency}% for the next watch.`,
+        headingNote,
         rest,
-      ]
+      ].filter(Boolean)
     },
   },
   {
@@ -103,16 +111,18 @@ const HEARTBEAT_TASKS = [
       const stress = describeStressLevel(metrics?.stress ?? 0)
       return `${crewMember.name}: Thermal envelopes steady; engineering watch is ${stress.label.toLowerCase()}.`
     },
-    buildThoughts: ({ metrics }) => {
+    buildThoughts: ({ telemetry, metrics }) => {
       const fatigue = metrics ? Math.round(metrics.fatigue) : 0
       const rotation = metrics
         ? `${metrics.awakeUnits} specialists managing propulsion while ${metrics.restingUnits} recover.`
         : 'Propulsion teams managing standard rotations.'
+      const headingNote = describeHeadingForThought(telemetry)
       return [
         'Sweeping diagnostics across propulsion pods.',
         rotation,
         `Fatigue trending at ${fatigue}% — recalibrating coolant trims accordingly.`,
-      ]
+        headingNote,
+      ].filter(Boolean)
     },
   },
   {
@@ -123,13 +133,15 @@ const HEARTBEAT_TASKS = [
     },
     buildThoughts: ({ telemetry, metrics }) => {
       const efficiency = metrics ? Math.round(metrics.efficiency * 100) : 100
+      const headingNote = describeHeadingForThought(telemetry)
       return [
         `Interpolating bathymetry at ${(telemetry.progress * 100).toFixed(1)}% of route.`,
         `Current helm efficiency steady at ${efficiency}%.`,
         metrics
           ? `${metrics.awakeUnits} charting specialists awake, ${metrics.restingUnits} rotating to rest.`
           : 'Synchronizing updates with mission command.',
-      ]
+        headingNote,
+      ].filter(Boolean)
     },
   },
   {
@@ -138,16 +150,18 @@ const HEARTBEAT_TASKS = [
       const stress = describeStressLevel(metrics?.stress ?? 0)
       return `${crewMember.name}: Crew rotations steady; operations posture ${stress.label.toLowerCase()}.`
     },
-    buildThoughts: ({ metrics }) => {
+    buildThoughts: ({ telemetry, metrics }) => {
       const fatigue = metrics ? Math.round(metrics.fatigue) : 0
       const rest = metrics && metrics.restingUnits > 0
         ? `${metrics.restingUnits} coordinators off-shift to manage fatigue.`
         : 'No reserve teams remaining — monitoring morale closely.'
+      const headingNote = describeHeadingForThought(telemetry)
       return [
         'Auditing compartment readiness reports.',
         rest,
         `Tracking fatigue at ${fatigue}% to plan relief timings.`,
-      ]
+        headingNote,
+      ].filter(Boolean)
     },
   },
 ]
@@ -165,11 +179,38 @@ function projectPoint({ latitude, longitude }) {
   return [x, y]
 }
 
+function normalizeAngle(degrees) {
+  const wrapped = degrees % 360
+  return wrapped < 0 ? wrapped + 360 : wrapped
+}
+
+function bearingToCardinal(degrees) {
+  const headings = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+  const normalized = normalizeAngle(degrees)
+  const index = Math.round((normalized % 360) / 45) % headings.length
+  return headings[index]
+}
+
+function formatHeadingLabel(degrees) {
+  const normalized = normalizeAngle(degrees)
+  return `${normalized.toFixed(0)}° ${bearingToCardinal(normalized)}`
+}
+
+function describeHeadingForThought(telemetry) {
+  if (!telemetry || typeof telemetry.heading !== 'number') return null
+  return `Helm aligned ${formatHeadingLabel(telemetry.heading)}.`
+}
+
 function formatTime(totalMs) {
   const totalSeconds = Math.floor(totalMs / 1000)
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+}
+
+function formatTimeScaleLabel(value) {
+  if (!Number.isFinite(value)) return '1'
+  return Number.isInteger(value) ? value.toString() : value.toFixed(1)
 }
 
 function clamp(value, min, max) {
@@ -282,6 +323,34 @@ function CrewSidebar({
   isCollapsed,
   onToggleCollapse,
 }) {
+  const crewComplement = Number.isFinite(totalCrewUnits)
+    ? totalCrewUnits.toLocaleString()
+    : String(totalCrewUnits ?? 0)
+
+  const statusItems = [
+    {
+      key: 'stress',
+      label: 'Team stress',
+      value: stressGrade.label,
+      badge: `${Math.round(aggregateStress)}%`,
+      tone: stressGrade.tone,
+    },
+    {
+      key: 'crew',
+      label: 'Crew complement',
+      value: crewComplement,
+      badge: 'specialists',
+      tone: null,
+    },
+    {
+      key: 'peak',
+      label: 'Peak stress',
+      value: `${Math.round(peakTeamStress)}%`,
+      badge: 'mission peak',
+      tone: null,
+    },
+  ]
+
   return (
     <aside
       className={isCollapsed ? 'crew-sidebar crew-sidebar--collapsed' : 'crew-sidebar'}
@@ -300,25 +369,27 @@ function CrewSidebar({
         <span className={isPaused ? 'status-dot paused' : 'status-dot running'} aria-hidden="true" />
         <span>{isPaused ? (canResume ? 'Paused' : 'Awaiting launch') : 'Underway'}</span>
       </div>
-        {isCollapsed ? (
-          <div className="crew-sidebar__compact">
-            <h1>Global Cable Traverse</h1>
-            <div className={`crew-sidebar__aggregate crew-sidebar__aggregate--${stressGrade.tone}`}>
-              <span className="crew-sidebar__aggregate-label">Team stress</span>
-              <span className="crew-sidebar__aggregate-value">
-                {stressGrade.label} ({Math.round(aggregateStress)}%)
-              </span>
+      {isCollapsed ? (
+        <div className="crew-sidebar__compact">
+          <h1>Global Cable Traverse</h1>
+          <dl className="crew-sidebar__compact-grid">
+            <div>
+              <dt>Stress</dt>
+              <dd className={`crew-sidebar__compact-value crew-sidebar__compact-value--${stressGrade.tone}`}>
+                {Math.round(aggregateStress)}%
+              </dd>
             </div>
-            <div className="crew-sidebar__aggregate">
-              <span className="crew-sidebar__aggregate-label">Crew complement</span>
-              <span className="crew-sidebar__aggregate-value">{totalCrewUnits} specialists</span>
+            <div>
+              <dt>Crew</dt>
+              <dd className="crew-sidebar__compact-value">{crewComplement}</dd>
             </div>
-            <div className="crew-sidebar__aggregate">
-              <span className="crew-sidebar__aggregate-label">Peak stress</span>
-              <span className="crew-sidebar__aggregate-value">{Math.round(peakTeamStress)}%</span>
+            <div>
+              <dt>Peak</dt>
+              <dd className="crew-sidebar__compact-value">{Math.round(peakTeamStress)}%</dd>
             </div>
-            <p className="crew-sidebar__rotation">{rotationSummary}</p>
-            <button
+          </dl>
+          <p className="crew-sidebar__compact-rotation">{rotationSummary}</p>
+          <button
             type="button"
             className="crew-sidebar__button crew-sidebar__button--icon"
             onClick={onOpenBriefing}
@@ -329,87 +400,103 @@ function CrewSidebar({
         </div>
       ) : (
         <div id="crew-sidebar-content" className="crew-sidebar__content">
-            <header className="crew-sidebar__header">
-              <h1>Global Cable Traverse</h1>
-              <p>{stressGrade.narrative}</p>
-              <div className="crew-sidebar__summary-grid">
-                <div>
-                  <span className="crew-sidebar__aggregate-label">Team stress</span>
-                  <strong className={`crew-sidebar__aggregate-value crew-sidebar__aggregate-value--${stressGrade.tone}`}>
-                    {stressGrade.label} ({Math.round(aggregateStress)}%)
-                  </strong>
+          <header className="crew-sidebar__header">
+            <h1>Global Cable Traverse</h1>
+            <p>{stressGrade.narrative}</p>
+          </header>
+          <section className="crew-sidebar__section" aria-labelledby="crew-overview-heading">
+            <h2 id="crew-overview-heading" className="crew-sidebar__section-title">
+              Mission posture
+            </h2>
+            <div className="crew-sidebar__overview">
+              {statusItems.map((item) => (
+                <div
+                  key={item.key}
+                  className={[
+                    'crew-sidebar__overview-item',
+                    item.tone ? `crew-sidebar__overview-item--${item.tone}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                >
+                  <span className="crew-sidebar__overview-label">{item.label}</span>
+                  <strong className="crew-sidebar__overview-value">{item.value}</strong>
+                  {item.badge ? <span className="crew-sidebar__overview-badge">{item.badge}</span> : null}
                 </div>
-                <div>
-                  <span className="crew-sidebar__aggregate-label">Crew complement</span>
-                  <strong className="crew-sidebar__aggregate-value">{totalCrewUnits} specialists</strong>
-                </div>
-                <div>
-                  <span className="crew-sidebar__aggregate-label">Rotation</span>
-                  <strong className="crew-sidebar__aggregate-value">{rotationSummary}</strong>
-                </div>
-                <div>
-                  <span className="crew-sidebar__aggregate-label">Peak stress</span>
-                  <strong className="crew-sidebar__aggregate-value">{Math.round(peakTeamStress)}%</strong>
-                </div>
-              </div>
-            </header>
-          <ul className="crew-sidebar__list">
-            {crewState.map((member) => {
-              const metrics = crewMetrics[member.id]
-              const stressValue = metrics ? Math.round(metrics.stress) : 0
-              const fatigueValue = metrics ? Math.round(metrics.fatigue) : 0
-              const efficiency = metrics ? Math.round(metrics.efficiency * 100) : 100
-              const memberStress = describeStressLevel(stressValue)
-              const rotationInfo = metrics
-                ? `${metrics.awakeUnits} on watch / ${metrics.restingUnits} resting`
-                : 'Establishing sleep cycles'
-              return (
-                <li key={member.id}>
-                  <div className="crew-list__header">
-                    <div>
-                      <span className="crew-role">{member.role}</span>
-                      <p className="crew-list__name">{member.name}</p>
+              ))}
+            </div>
+            <p className="crew-sidebar__rotation">{rotationSummary}</p>
+          </section>
+          <section className="crew-sidebar__section" aria-labelledby="crew-roster-heading">
+            <div className="crew-sidebar__section-header">
+              <h2 id="crew-roster-heading" className="crew-sidebar__section-title">
+                Bridge roster
+              </h2>
+              <span className="crew-sidebar__section-hint">{crewComplement} specialists embarked</span>
+            </div>
+            <ul className="crew-sidebar__list">
+              {crewState.map((member) => {
+                const metrics = crewMetrics[member.id]
+                const stressValue = metrics ? Math.round(metrics.stress) : 0
+                const fatigueValue = metrics ? Math.round(metrics.fatigue) : 0
+                const efficiency = metrics ? Math.round(metrics.efficiency * 100) : 100
+                const memberStress = describeStressLevel(stressValue)
+                const rotationInfo = metrics
+                  ? `${metrics.awakeUnits} on watch / ${metrics.restingUnits} resting`
+                  : 'Establishing sleep cycles'
+                return (
+                  <li key={member.id} className="crew-person">
+                    <div className="crew-person__header">
+                      <div>
+                        <span className="crew-role">{member.role}</span>
+                        <p className="crew-person__name">{member.name}</p>
+                      </div>
+                      <span className="crew-units">{member.units} units</span>
                     </div>
-                    <span className="crew-units">{member.units} units</span>
-                  </div>
-                  <div className="crew-metric" role="group" aria-label={`${member.name} stress level`}>
-                    <span className="crew-metric__label">Stress</span>
-                    <div
-                      className="crew-metric__bar"
-                      role="progressbar"
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={stressValue}
-                    >
-                      <span
-                        className={`crew-metric__fill crew-metric__fill--${memberStress.tone}`}
-                        style={{ width: `${stressValue}%` }}
-                      />
+                    <div className="crew-person__metrics">
+                      <div className="crew-metric" role="group" aria-label={`${member.name} stress level`}>
+                        <span className="crew-metric__label">Stress</span>
+                        <div
+                          className="crew-metric__bar"
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={stressValue}
+                        >
+                          <span
+                            className={`crew-metric__fill crew-metric__fill--${memberStress.tone}`}
+                            style={{ width: `${stressValue}%` }}
+                          />
+                        </div>
+                        <span className="crew-metric__value">{stressValue}%</span>
+                      </div>
+                      <div className="crew-metric" role="group" aria-label={`${member.name} fatigue level`}>
+                        <span className="crew-metric__label">Fatigue</span>
+                        <div
+                          className="crew-metric__bar"
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={fatigueValue}
+                        >
+                          <span
+                            className="crew-metric__fill crew-metric__fill--fatigue"
+                            style={{ width: `${fatigueValue}%` }}
+                          />
+                        </div>
+                        <span className="crew-metric__value">{fatigueValue}%</span>
+                      </div>
+                      <div className="crew-metric crew-metric--inline" role="group" aria-label={`${member.name} efficiency`}>
+                        <span className="crew-metric__label">Efficiency</span>
+                        <strong className="crew-metric__value">{efficiency}%</strong>
+                        <span className="crew-metric__subtle">{rotationInfo}</span>
+                      </div>
                     </div>
-                    <span className="crew-metric__value">{stressValue}%</span>
-                  </div>
-                  <div className="crew-metric" role="group" aria-label={`${member.name} fatigue level`}>
-                    <span className="crew-metric__label">Fatigue</span>
-                    <div
-                      className="crew-metric__bar"
-                      role="progressbar"
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={fatigueValue}
-                    >
-                      <span className="crew-metric__fill crew-metric__fill--fatigue" style={{ width: `${fatigueValue}%` }} />
-                    </div>
-                    <span className="crew-metric__value">{fatigueValue}%</span>
-                  </div>
-                  <div className="crew-metric crew-metric--inline" role="group" aria-label={`${member.name} efficiency`}>
-                    <span className="crew-metric__label">Efficiency</span>
-                    <strong className="crew-metric__value">{efficiency}%</strong>
-                    <span className="crew-metric__subtle">{rotationInfo}</span>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
           <button type="button" className="crew-sidebar__button" onClick={onOpenBriefing}>
             View crew instructions
           </button>
@@ -674,7 +761,16 @@ function MissionControls({
   isPaused,
   isCollapsed,
   onToggleCollapse,
+  timeScale,
+  onTimeScaleChange,
+  missionFailure,
+  timeScaleMin,
+  timeScaleMax,
 }) {
+  const currentScaleLabel = `${formatTimeScaleLabel(timeScale)}×`
+  const minScaleLabel = `${formatTimeScaleLabel(timeScaleMin)}×`
+  const maxScaleLabel = `${formatTimeScaleLabel(timeScaleMax)}×`
+
   return (
     <section className={isCollapsed ? 'mission-controls mission-controls--collapsed' : 'mission-controls'}>
       <header className="mission-controls__header">
@@ -687,18 +783,60 @@ function MissionControls({
         </button>
       </header>
       {isCollapsed ? (
-        <div className="mission-controls__summary">Elapsed {formatTime(elapsedMs)}</div>
+        <div className="mission-controls__summary">
+          Elapsed {formatTime(elapsedMs)} · {currentScaleLabel} speed
+        </div>
       ) : (
         <div className="mission-controls__body">
           <div className="mission-status">
             <span>Elapsed</span>
             <strong>{formatTime(elapsedMs)}</strong>
           </div>
+          <div className="mission-speed">
+            <div className="mission-speed__header">
+              <span>Time compression</span>
+              <div className="mission-speed__readout" aria-live="polite">
+                <strong>{currentScaleLabel}</strong>
+                <span>current rate</span>
+              </div>
+            </div>
+            <div className="mission-speed__slider">
+              <input
+                type="range"
+                min={timeScaleMin}
+                max={timeScaleMax}
+                step={0.5}
+                value={timeScale}
+                onChange={(event) => onTimeScaleChange(event.target.value)}
+                aria-label="Adjust simulation speed"
+              />
+              <div className="mission-speed__slider-labels" aria-hidden="true">
+                <span>{minScaleLabel}</span>
+                <span>{maxScaleLabel}</span>
+              </div>
+            </div>
+            <div className="mission-speed__choices" role="group" aria-label="Select simulation speed preset">
+              {TIME_SCALE_OPTIONS.map((option) => {
+                const active = Math.abs(option - timeScale) < 0.01
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    className={active ? 'mission-speed__button mission-speed__button--active' : 'mission-speed__button'}
+                    onClick={() => onTimeScaleChange(option)}
+                    aria-pressed={active}
+                  >
+                    {formatTimeScaleLabel(option)}×
+                  </button>
+                )
+              })}
+            </div>
+          </div>
           <div className="mission-buttons">
             <button type="button" onClick={onStart} disabled={!canStart}>
               Launch voyage
             </button>
-            <button type="button" onClick={onPauseToggle} disabled={!isRunning}>
+            <button type="button" onClick={onPauseToggle} disabled={!isRunning || missionFailure}>
               {isPaused ? 'Resume' : 'Pause'}
             </button>
             <button type="button" onClick={onRestart}>
@@ -711,11 +849,34 @@ function MissionControls({
   )
 }
 
+function MissionFailureBanner({ failure, onRestart }) {
+  if (!failure) return null
+  const eventTime = new Date(failure.timestamp)
+  const timestampLabel = Number.isNaN(eventTime.getTime())
+    ? ''
+    : eventTime.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  return (
+    <div className="mission-failure" role="status" aria-live="assertive">
+      <div className="mission-failure__summary">
+        <h3>{failure.reason}</h3>
+        <p>{failure.narrative}</p>
+        {timestampLabel ? <span className="mission-failure__timestamp">Logged {timestampLabel}</span> : null}
+      </div>
+      <div className="mission-failure__actions">
+        <button type="button" onClick={onRestart}>
+          Reset mission
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function MapViewport({
   route,
   progress,
   milestones,
   submarinePosition,
+  helmTrail,
   obstacles,
   onAddObstacle,
   isRunning,
@@ -725,6 +886,7 @@ function MapViewport({
   resourceStats,
   aggregateStress,
   stressGrade,
+  headingLabel,
 }) {
   const projectedRoute = useMemo(() => {
     if (!route) return []
@@ -804,6 +966,10 @@ function MapViewport({
             <strong>{telemetrySummary.depthLabel}</strong>
           </div>
           <div className="map-panel__stat" role="listitem">
+            <span>Heading</span>
+            <strong>{headingLabel}</strong>
+          </div>
+          <div className="map-panel__stat" role="listitem">
             <span>Crew size</span>
             <strong>{telemetrySummary.crewLabel}</strong>
           </div>
@@ -845,6 +1011,9 @@ function MapViewport({
                     ) : null,
                   )}
                 </g>
+              ) : null}
+              {helmTrail && helmTrail.length > 1 ? (
+                <polyline className="submarine-trail" points={helmTrail.map(([x, y]) => `${x},${y}`).join(' ')} />
               ) : null}
               {projectedObstacles.map((obstacle) => {
                 if (!obstacle) return null
@@ -892,6 +1061,10 @@ function MapViewport({
                 <span>Depth</span>
                 <strong>{telemetrySummary.depthLabel}</strong>
               </div>
+              <div className="map-overlay__chip">
+                <span>Heading</span>
+                <strong>{headingLabel}</strong>
+              </div>
             </div>
             <div className="obstacle-console" aria-hidden={!isRunning}>
               <strong>Inject challenges</strong>
@@ -904,6 +1077,11 @@ function MapViewport({
           </div>
           <div className="map-panel__footer">
             <div className="resource-grid">
+              <div>
+                <span>Helm alignment</span>
+                <strong>{headingLabel}</strong>
+                <p>{telemetrySummary.driftLabel}</p>
+              </div>
               <div>
                 <span>Fuel consumed</span>
                 <strong>{resourceStats.fuelPercentage.toFixed(1)}%</strong>
@@ -978,6 +1156,20 @@ function App() {
   const [obstacles, setObstacles] = useState([])
   const previousRouteKeyRef = useRef('none')
   const [peakTeamStress, setPeakTeamStress] = useState(0)
+  const [timeScale, setTimeScale] = useState(() => {
+    const candidate = Number.isFinite(DEFAULT_TIME_SCALE) && DEFAULT_TIME_SCALE > 0 ? DEFAULT_TIME_SCALE : 1
+    return clamp(candidate, TIME_SCALE_MIN, TIME_SCALE_MAX)
+  })
+  const timeScaleRef = useRef(timeScale)
+  const [missionFailure, setMissionFailure] = useState(null)
+  const missionFailureRef = useRef(null)
+  const [helmState, setHelmState] = useState({ headingDeg: 90, lateralOffset: 0, segmentIndex: 0, segmentRatio: 0 })
+  const helmStateRef = useRef(helmState)
+  const [helmTrail, setHelmTrail] = useState([])
+  const helmTrailRef = useRef([])
+  const offCourseDurationRef = useRef(0)
+  const lastCollisionCheckRef = useRef(0)
+  const resourceSnapshotRef = useRef({ fuelPercentage: 0 })
 
   const animationFrameRef = useRef(null)
   const lastTickRef = useRef(null)
@@ -998,6 +1190,27 @@ function App() {
     setLogEntries((entries) => [entry, ...entries])
   }, [])
 
+  const triggerMissionFailure = useCallback(
+    (reason, narrative) => {
+      if (missionFailureRef.current) return
+      const timestamp = new Date().toISOString()
+      const failure = { reason, narrative, timestamp }
+      missionFailureRef.current = failure
+      setMissionFailure(failure)
+      setIsRunning(false)
+      setIsPaused(true)
+      pushLogEntry({
+        id: createId('log'),
+        type: 'system',
+        author: 'Mission Control',
+        transcript: `${reason}: ${narrative}`,
+        chainOfThought: [],
+        timestamp,
+      })
+    },
+    [pushLogEntry],
+  )
+
   const scheduleLogEntry = useCallback(
     (delay, factory) => {
       const timeoutId = setTimeout(() => {
@@ -1009,9 +1222,85 @@ function App() {
     [pushLogEntry],
   )
 
+  const updateHelmState = useCallback(
+    (deltaMs, progressValue) => {
+      if (!currentRoute || !currentRoute.path || currentRoute.path.length < 2) return
+      if (missionFailureRef.current) return
+      const totalSegments = currentRoute.path.length - 1
+      const clampedProgress = clamp(progressValue, 0, 0.999999)
+      const targetDistance = clampedProgress * totalSegments
+      const segmentIndex = Math.min(Math.floor(targetDistance), totalSegments - 1)
+      const rawRatio = targetDistance - segmentIndex
+      const segmentRatio = clamp(rawRatio, 0, 1)
+      const start = currentRoute.path[segmentIndex]
+      const end = currentRoute.path[segmentIndex + 1]
+      const startProjected = projectPoint(start)
+      const endProjected = projectPoint(end)
+      const dx = endProjected[0] - startProjected[0]
+      const dy = endProjected[1] - startProjected[1]
+      const length = Math.hypot(dx, dy) || 1
+      const headingRad = Math.atan2(dy, dx)
+      const baseHeading = (headingRad * 180) / Math.PI
+      const deltaSeconds = Math.max(deltaMs / 1000, 0)
+      const correctionForce = -helmStateRef.current.lateralOffset * 0.55
+      const turbulence = (Math.random() - 0.5) * 18 * deltaSeconds
+      const nextOffset = clamp(
+        helmStateRef.current.lateralOffset + correctionForce * deltaSeconds + turbulence,
+        -MAX_LATERAL_OFFSET,
+        MAX_LATERAL_OFFSET,
+      )
+      const headingDeviation = (nextOffset / MAX_LATERAL_OFFSET) * 12
+      const headingDeg = normalizeAngle(baseHeading + headingDeviation)
+      const updatedState = {
+        headingDeg,
+        lateralOffset: nextOffset,
+        segmentIndex,
+        segmentRatio,
+      }
+      helmStateRef.current = updatedState
+      setHelmState(updatedState)
+
+      const px = -dy / length
+      const py = dx / length
+      const x = startProjected[0] + dx * segmentRatio + px * nextOffset
+      const y = startProjected[1] + dy * segmentRatio + py * nextOffset
+      const nextTrail = [...helmTrailRef.current, [x, y]]
+      if (nextTrail.length > 240) nextTrail.shift()
+      helmTrailRef.current = nextTrail
+      setHelmTrail(nextTrail)
+
+      const absOffset = Math.abs(nextOffset)
+      if (absOffset > MAX_LATERAL_OFFSET * 0.8) {
+        offCourseDurationRef.current += deltaSeconds
+      } else {
+        offCourseDurationRef.current = Math.max(0, offCourseDurationRef.current - deltaSeconds)
+      }
+
+      if (offCourseDurationRef.current > 12 && !missionFailureRef.current) {
+        triggerMissionFailure(
+          'Steered off course',
+          `Helm drift exceeded safe corridor at ${formatHeadingLabel(headingDeg)}.`,
+        )
+      }
+    },
+    [currentRoute, triggerMissionFailure],
+  )
+
   useEffect(() => {
     crewMetricsRef.current = crewMetrics
   }, [crewMetrics])
+
+  useEffect(() => {
+    timeScaleRef.current = timeScale
+  }, [timeScale])
+
+  useEffect(() => {
+    helmStateRef.current = helmState
+  }, [helmState])
+
+  useEffect(() => {
+    missionFailureRef.current = missionFailure
+  }, [missionFailure])
 
   const crewById = useMemo(() => {
     const map = new Map()
@@ -1135,23 +1424,32 @@ function App() {
   }, [origin])
 
   useEffect(() => {
-    latestTelemetryRef.current = { progress, elapsedMs }
-  }, [progress, elapsedMs])
+    latestTelemetryRef.current = {
+      progress,
+      elapsedMs,
+      heading: helmState.headingDeg,
+      lateralOffset: helmState.lateralOffset,
+    }
+  }, [progress, elapsedMs, helmState])
 
   const submarinePosition = useMemo(() => {
-    if (!currentRoute) return null
-    if (!currentRoute.path.length) return null
+    if (!currentRoute || currentRoute.path.length < 2) return null
     const totalSegments = currentRoute.path.length - 1
-    if (totalSegments <= 0) return projectPoint(currentRoute.path[0])
-    const targetDistance = progress * totalSegments
-    const baseIndex = Math.min(Math.floor(targetDistance), totalSegments - 1)
-    const segmentRatio = targetDistance - baseIndex
-    const start = currentRoute.path[baseIndex]
-    const end = currentRoute.path[baseIndex + 1]
-    const latitude = start.latitude + (end.latitude - start.latitude) * segmentRatio
-    const longitude = start.longitude + (end.longitude - start.longitude) * segmentRatio
-    return projectPoint({ latitude, longitude })
-  }, [currentRoute, progress])
+    const segmentIndex = clamp(helmState.segmentIndex, 0, totalSegments - 1)
+    const segmentRatio = clamp(helmState.segmentRatio, 0, 1)
+    const start = currentRoute.path[segmentIndex]
+    const end = currentRoute.path[segmentIndex + 1]
+    const startProjected = projectPoint(start)
+    const endProjected = projectPoint(end)
+    const dx = endProjected[0] - startProjected[0]
+    const dy = endProjected[1] - startProjected[1]
+    const length = Math.hypot(dx, dy) || 1
+    const px = -dy / length
+    const py = dx / length
+    const x = startProjected[0] + dx * segmentRatio + px * helmState.lateralOffset
+    const y = startProjected[1] + dy * segmentRatio + py * helmState.lateralOffset
+    return [x, y]
+  }, [currentRoute, helmState])
 
   useEffect(() => {
     if (!isRunning || isPaused || !currentRoute) {
@@ -1171,13 +1469,14 @@ function App() {
         animationFrameRef.current = requestAnimationFrame(step)
         return
       }
-      const delta = (timestamp - lastTickRef.current) * TIME_SCALE
+      const delta = (timestamp - lastTickRef.current) * timeScaleRef.current
       lastTickRef.current = timestamp
       let completed = false
       setElapsedMs((previous) => {
         const next = Math.min(previous + delta, travelMs)
-        const progressValue = next / travelMs
+        const progressValue = travelMs > 0 ? next / travelMs : 0
         setProgress(progressValue)
+        updateHelmState(delta, progressValue)
         if (next >= travelMs) {
           completed = true
         }
@@ -1200,7 +1499,7 @@ function App() {
         animationFrameRef.current = null
       }
     }
-  }, [isRunning, isPaused, currentRoute])
+  }, [isRunning, isPaused, currentRoute, updateHelmState])
 
   useEffect(() => {
     if (!obstacles.some((obstacle) => !obstacle.resolved)) return
@@ -1244,7 +1543,7 @@ function App() {
       }, 4500)
       obstacleTimersRef.current.add(cleanupId)
     })
-  }, [progress, obstacles, pushLogEntry, adjustCrewStress])
+  }, [progress, obstacles, pushLogEntry, adjustCrewStress, buildStressNotes])
 
   useEffect(() => {
     if (!currentRoute) return
@@ -1270,7 +1569,15 @@ function App() {
             crewMember,
             milestone,
             route: currentRoute,
-            elapsedMinutes: (elapsedMs / 1000) / 60,
+            elapsedMinutes: elapsedMs / 60000,
+            telemetry: {
+              progress,
+              headingDeg: helmStateRef.current.headingDeg,
+              lateralOffset: helmStateRef.current.lateralOffset,
+              fuelPercentage: resourceSnapshotRef.current.fuelPercentage,
+            },
+            crewMetrics: crewMetricsRef.current[crewId],
+            aggregateStress: aggregateTeamStress,
           })
           setLogEntries((entries) => [
             {
@@ -1288,7 +1595,16 @@ function App() {
         })
       }
     })
-  }, [progress, currentRoute, crewState, elapsedMs, triggeredMilestones, adjustCrewStress, buildStressNotes])
+  }, [
+    progress,
+    currentRoute,
+    crewState,
+    elapsedMs,
+    triggeredMilestones,
+    adjustCrewStress,
+    buildStressNotes,
+    aggregateTeamStress,
+  ])
 
   useEffect(() => {
     if (progress >= 1 && isRunning) {
@@ -1355,6 +1671,12 @@ function App() {
     [crewState, isPaused, isRunning],
   )
 
+  const handleTimeScaleChange = useCallback((value) => {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return
+    setTimeScale(clamp(numeric, TIME_SCALE_MIN, TIME_SCALE_MAX))
+  }, [])
+
   useEffect(() => {
     const delta = elapsedMs - lastElapsedRef.current
     lastElapsedRef.current = elapsedMs
@@ -1386,7 +1708,7 @@ function App() {
         chainOfThought: [...sequence.buildThoughts({ crewMember, telemetry, metrics }), ...buildStressNotes(crewMember.id)],
         timestamp: new Date().toISOString(),
       })
-    }, Math.max(4000, 12000 / Math.max(TIME_SCALE, 0.1)))
+    }, Math.max(4000 / Math.max(timeScaleRef.current, 0.25), 3000))
 
     heartbeatIntervalRef.current = interval
 
@@ -1394,7 +1716,7 @@ function App() {
       clearInterval(interval)
       heartbeatIntervalRef.current = null
     }
-  }, [isRunning, isPaused, crewState, pushLogEntry, buildStressNotes])
+  }, [isRunning, isPaused, crewState, pushLogEntry, buildStressNotes, timeScale])
 
   const canStart = Boolean(currentRoute) && !isRunning
 
@@ -1417,6 +1739,15 @@ function App() {
     setIsPaused(false)
     setHasLaunched(true)
     setObstacles([])
+    setMissionFailure(null)
+    missionFailureRef.current = null
+    const resetHelm = { headingDeg: 90, lateralOffset: 0, segmentIndex: 0, segmentRatio: 0 }
+    helmStateRef.current = resetHelm
+    setHelmState(resetHelm)
+    helmTrailRef.current = []
+    setHelmTrail([])
+    offCourseDurationRef.current = 0
+    lastCollisionCheckRef.current = 0
     crewHeartbeatIndexRef.current = 0
     lastElapsedRef.current = 0
     setPeakTeamStress(aggregateTeamStress)
@@ -1431,6 +1762,7 @@ function App() {
 
   const handlePauseToggle = () => {
     if (!isRunning) return
+    if (missionFailureRef.current) return
     setIsPaused((state) => !state)
   }
 
@@ -1443,6 +1775,15 @@ function App() {
     setLogEntries([])
     setHasLaunched(false)
     setObstacles([])
+    setMissionFailure(null)
+    missionFailureRef.current = null
+    helmTrailRef.current = []
+    setHelmTrail([])
+    const resetHelm = { headingDeg: 90, lateralOffset: 0, segmentIndex: 0, segmentRatio: 0 }
+    helmStateRef.current = resetHelm
+    setHelmState(resetHelm)
+    offCourseDurationRef.current = 0
+    lastCollisionCheckRef.current = 0
     setIsMapCollapsed(false)
     obstacleTimersRef.current.forEach((timeoutId) => clearTimeout(timeoutId))
     obstacleTimersRef.current.clear()
@@ -1623,6 +1964,52 @@ function App() {
     projectedRangeNm,
   }
 
+  useEffect(() => {
+    resourceSnapshotRef.current = { fuelPercentage: resourceStats.fuelPercentage }
+  }, [resourceStats.fuelPercentage])
+
+  useEffect(() => {
+    if (!isRunning || missionFailureRef.current) return
+    if (fuelConsumedLiters >= FUEL_TANK_CAPACITY_LITERS) {
+      triggerMissionFailure(
+        'Fuel exhausted',
+        'Main tanks depleted before securing the cable corridor. Engineering recommends immediate surface support.',
+      )
+    }
+  }, [fuelConsumedLiters, isRunning, triggerMissionFailure])
+
+  useEffect(() => {
+    if (!isRunning || missionFailureRef.current) return
+    const imminent = obstacles.find((obstacle) => !obstacle.resolved && progress >= obstacle.ratio - 0.015)
+    if (!imminent) return
+    const overshoot = progress - imminent.ratio
+    if (overshoot > 0.03 && Math.abs(helmState.lateralOffset) > MAX_LATERAL_OFFSET * 0.65) {
+      const config = OBSTACLE_TYPES[imminent.type] ?? {}
+      triggerMissionFailure(
+        'Obstacle collision',
+        `Hull impacted ${config.label ?? 'an uncharted structure'} while drifting ${helmState.lateralOffset > 0 ? 'starboard' : 'port'}.`,
+      )
+    }
+  }, [isRunning, obstacles, progress, helmState.lateralOffset, triggerMissionFailure])
+
+  useEffect(() => {
+    if (!isRunning || missionFailureRef.current) return
+    if (aggregateTeamStress < 75) return
+    if (Math.abs(helmState.lateralOffset) < MAX_LATERAL_OFFSET * 0.6) return
+    if (elapsedMs - lastCollisionCheckRef.current < 6000) return
+    lastCollisionCheckRef.current = elapsedMs
+    const collisionChance = Math.min(
+      0.55,
+      (aggregateTeamStress / 100) * (Math.abs(helmState.lateralOffset) / MAX_LATERAL_OFFSET),
+    )
+    if (Math.random() < collisionChance) {
+      triggerMissionFailure(
+        'Collision with surface ship',
+        `While correcting to ${headingLabel}, the submarine crossed convoy traffic and struck a support vessel.`,
+      )
+    }
+  }, [aggregateTeamStress, helmState.lateralOffset, elapsedMs, isRunning, triggerMissionFailure, headingLabel])
+
   const depthMeters = useMemo(() => {
     if (!currentRoute) return 0
     const baseDepth = 210
@@ -1634,6 +2021,17 @@ function App() {
     return Math.round(clamp(value, 120, 360))
   }, [currentRoute, progress, obstacles, aggregateTeamStress, triggeredMilestones])
 
+  const headingLabel = useMemo(() => formatHeadingLabel(helmState.headingDeg), [helmState.headingDeg])
+
+  const driftLabel = useMemo(() => {
+    const magnitude = Math.abs(helmState.lateralOffset)
+    if (magnitude < 1) {
+      return 'On centerline'
+    }
+    const direction = helmState.lateralOffset > 0 ? 'starboard' : 'port'
+    return `${magnitude.toFixed(0)} pts ${direction}`
+  }, [helmState.lateralOffset])
+
   const telemetrySummary = {
     elapsedLabel: formatTime(elapsedMs),
     milestonesLabel: `${triggeredMilestones.length}/${currentRoute?.milestones.length ?? 0}`,
@@ -1641,6 +2039,8 @@ function App() {
     depthLabel: `${depthMeters} m`,
     crewLabel: `${totalCrewUnits} specialists`,
     crewUnits: totalCrewUnits,
+    driftLabel,
+    headingLabel,
   }
 
   const rotationSummary = useMemo(() => {
@@ -1692,6 +2092,7 @@ function App() {
         onToggleCollapse={() => setIsSidebarCollapsed((state) => !state)}
       />
       <main className="main-panel">
+        <MissionFailureBanner failure={missionFailure} onRestart={handleRestart} />
         <div className="top-controls">
           <RouteSelector
             origin={origin}
@@ -1723,6 +2124,11 @@ function App() {
             isPaused={isPaused}
             isCollapsed={isMissionCollapsed}
             onToggleCollapse={() => setIsMissionCollapsed((state) => !state)}
+            timeScale={timeScale}
+            onTimeScaleChange={handleTimeScaleChange}
+            missionFailure={missionFailure}
+            timeScaleMin={TIME_SCALE_MIN}
+            timeScaleMax={TIME_SCALE_MAX}
           />
         </div>
         <ShipLog entries={logEntries} />
@@ -1731,6 +2137,7 @@ function App() {
           progress={progress}
           milestones={currentRoute?.milestones ?? []}
           submarinePosition={submarinePosition}
+          helmTrail={helmTrail}
           obstacles={obstacles}
           onAddObstacle={addObstacle}
           isRunning={isRunning && !isPaused}
@@ -1743,6 +2150,7 @@ function App() {
           resourceStats={resourceStats}
           aggregateStress={aggregateTeamStress}
           stressGrade={teamStressGrade}
+          headingLabel={headingLabel}
         />
       </main>
       {isCrewExpanded ? (
