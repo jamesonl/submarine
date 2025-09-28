@@ -1,40 +1,74 @@
-const RESPONSES_ENDPOINT = 'https://api.openai.com/v1/responses'
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'
+const REQUEST_TIMEOUT_MS = 30000
 
-const DEFAULT_MODEL = 'gpt-4.1-mini'
-
-function buildCrewPrompt({ crewMember, milestone, route, elapsedMinutes }) {
-  return [
-    {
-      role: 'system',
-      content: `You are ${crewMember.name}, ${crewMember.role} aboard a submarine tracing undersea cables. Provide a concise thought process (three short bullet points) and a closing directive sentence. Maintain professional naval tone.`,
-    },
-    {
-      role: 'user',
-      content: `Current milestone: ${milestone.label}. Situation: ${milestone.description}. Route: ${route.name} (${route.cable}). Elapsed minutes: ${elapsedMinutes.toFixed(
-        1,
-      )}. Alliances assisting: ${crewMember.alliances.join(
-        ', ',
-      )}. Primary directives: ${crewMember.instructions}. Share your internal reasoning bullets followed by a directive to the crew.`,
-    },
-  ]
+function sanitizeInstructions(value) {
+  if (!value) return ''
+  if (Array.isArray(value)) {
+    return value.join(' ')
+  }
+  return String(value)
 }
 
-async function callResponsesEndpoint({ apiKey, body }) {
-  const response = await fetch(RESPONSES_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
+function formatHeading(headingDeg) {
+  if (typeof headingDeg !== 'number' || Number.isNaN(headingDeg)) return 'steady course'
+  const wrapped = ((headingDeg % 360) + 360) % 360
+  const headings = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+  const index = Math.round((wrapped % 360) / 45) % headings.length
+  return `${wrapped.toFixed(0)}° ${headings[index]}`
+}
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}))
-    throw new Error(error.error?.message ?? 'Unable to fetch crew reasoning from OpenAI responses API')
+function describeDrift(lateralOffset) {
+  if (typeof lateralOffset !== 'number' || Number.isNaN(lateralOffset)) return 'holding centerline'
+  const magnitude = Math.abs(lateralOffset)
+  if (magnitude < 1) return 'holding centerline'
+  return `${magnitude.toFixed(0)} pt ${lateralOffset > 0 ? 'starboard' : 'port'} drift`
+}
+
+function buildFallbackThought({ crewMember, milestone, telemetry, aggregateStress }) {
+  const heading = formatHeading(telemetry?.headingDeg)
+  const drift = describeDrift(telemetry?.lateralOffset)
+  const stressLine = typeof aggregateStress === 'number'
+    ? `Team stress steady at ${Math.round(aggregateStress)}%.`
+    : 'Team stress within acceptable range.'
+  const alliances = crewMember.alliances?.length ? crewMember.alliances.join(', ') : 'bridge leads'
+
+  const chainOfThought = [
+    `Plotting ${heading} along the corridor with ${drift}.`,
+    `Coordinating with ${alliances} to screen ${milestone.label.toLowerCase()}.`,
+    stressLine,
+  ]
+
+  return {
+    transcript: `${crewMember.name}: Maintain ${heading.toLowerCase()} and report any deviation from ${milestone.label.toLowerCase()}.`,
+    chainOfThought,
+    provider: 'fallback',
   }
+}
 
-  return response.json()
+async function callBackend(path, payload) {
+  const url = `${BACKEND_URL.replace(/\/$/, '')}${path}`
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error?.error ?? `Backend request failed with status ${response.status}`)
+    }
+
+    return response.json()
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 export async function requestCrewThought({
@@ -42,53 +76,71 @@ export async function requestCrewThought({
   milestone,
   route,
   elapsedMinutes,
-  model = DEFAULT_MODEL,
+  telemetry = {},
+  crewMetrics = null,
+  aggregateStress,
 }) {
-  const apiKey = import.meta.env.VITE_OPENAI_API_KEY
-  if (!apiKey) {
-    const fallbackThoughts = [
-      `Reviewing ${milestone.label} hazard contours alongside ${crewMember.alliances.join(', ')}.`,
-      'Cross-referencing telemetry with bathymetric archives.',
-      'Reconfirming redundancy paths if the cable bends beyond safe tolerance.',
-    ]
+  if (!crewMember || !milestone || !route) {
     return {
-      transcript: `${crewMember.name}: Maintain formation discipline and execute countermeasures for ${milestone.label.toLowerCase()}.`,
-      chainOfThought: fallbackThoughts,
-      provider: 'fallback',
+      transcript: 'Mission Control: Unable to synthesise crew guidance.',
+      chainOfThought: ['Missing context for crew reasoning.'],
+      provider: 'error-fallback',
     }
   }
 
-  const messages = buildCrewPrompt({ crewMember, milestone, route, elapsedMinutes })
+  const basePayload = {
+    crew_member: {
+      id: crewMember.id,
+      name: crewMember.name,
+      role: crewMember.role,
+      alliances: crewMember.alliances ?? [],
+      instructions: sanitizeInstructions(crewMember.instructions),
+    },
+    milestone: {
+      id: milestone.id,
+      label: milestone.label,
+      description: milestone.description,
+    },
+    route: {
+      id: route.id,
+      name: route.name,
+      cable: route.cable,
+    },
+    elapsed_minutes: Number.isFinite(elapsedMinutes) ? elapsedMinutes : 0,
+    telemetry: {
+      progress: telemetry?.progress ?? 0,
+      heading_deg: telemetry?.headingDeg ?? null,
+      drift: telemetry?.lateralOffset ?? 0,
+      fuel_percentage: telemetry?.fuelPercentage ?? null,
+      stress_percentage: typeof aggregateStress === 'number' ? aggregateStress : null,
+    },
+    crew_metrics: crewMetrics
+      ? {
+          stress: crewMetrics.stress ?? null,
+          fatigue: crewMetrics.fatigue ?? null,
+          efficiency: crewMetrics.efficiency ?? null,
+        }
+      : null,
+  }
 
   try {
-    const payload = {
-      model,
-      input: messages,
-      temperature: 0.8,
-      max_output_tokens: 256,
+    const result = await callBackend('/api/crew/thought', basePayload)
+    const transcript = result.transcript ?? result.message
+    const chain = Array.isArray(result.chain_of_thought)
+      ? result.chain_of_thought
+      : Array.isArray(result.chainOfThought)
+        ? result.chainOfThought
+        : []
+    if (!transcript) {
+      throw new Error('Backend did not return transcript content')
     }
-
-    const result = await callResponsesEndpoint({ apiKey, body: payload })
-    const output = result.output?.[0]?.content?.[0]?.text ?? ''
-    const [rawThoughts, directive] = output.split('\n\n').map((part) => part.trim())
-    const chainOfThought = rawThoughts
-      ? rawThoughts
-          .split(/\n+/)
-          .map((line) => line.replace(/^[-*\d.\s]+/, '').trim())
-          .filter(Boolean)
-      : []
-
     return {
-      transcript: directive?.length ? directive : `${crewMember.name}: ${output.trim()}`,
-      chainOfThought: chainOfThought.length ? chainOfThought : [output.trim()],
-      provider: 'openai',
+      transcript,
+      chainOfThought: chain,
+      provider: result.provider ?? 'agents-backend',
     }
   } catch (error) {
-    console.error(error)
-    return {
-      transcript: `${crewMember.name}: Maintain vigilance while we pass ${milestone.label}.`,
-      chainOfThought: [error.message],
-      provider: 'error-fallback',
-    }
+    console.warn('Falling back to onboard reasoning:', error)
+    return buildFallbackThought({ crewMember, milestone, telemetry, aggregateStress })
   }
 }
