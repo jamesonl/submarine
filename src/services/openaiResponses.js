@@ -1,4 +1,4 @@
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'
+export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'
 const REQUEST_TIMEOUT_MS = 30000
 
 function sanitizeInstructions(value) {
@@ -131,6 +131,8 @@ export async function requestCrewThought({
       : Array.isArray(result.chainOfThought)
         ? result.chainOfThought
         : []
+    const conversation = Array.isArray(result.conversation) ? result.conversation : []
+    const logEntryId = result.log_entry_id ?? result.logEntryId ?? null
     if (!transcript) {
       throw new Error('Backend did not return transcript content')
     }
@@ -138,6 +140,8 @@ export async function requestCrewThought({
       transcript,
       chainOfThought: chain,
       provider: result.provider ?? 'agents-backend',
+      conversation,
+      logEntryId,
     }
   } catch (error) {
     console.warn('Falling back to onboard reasoning:', error)

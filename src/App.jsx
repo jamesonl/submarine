@@ -5,6 +5,12 @@ import { ports } from './data/ports.js'
 import { routes, resolvePort } from './data/routes.js'
 import { worldPolygons } from './data/world.js'
 import { requestCrewThought } from './services/openaiResponses.js'
+import {
+  downloadShipLog,
+  fetchShipLogStory,
+  recordShipLogEntry,
+  resetShipLog,
+} from './services/logbook.js'
 
 const MAP_WIDTH = 1280
 const MAP_HEIGHT = 720
@@ -290,6 +296,34 @@ function describeStressLevel(stressValue) {
     tone: 'critical',
     narrative: 'Stress spikes are compromising decision cadence.',
   }
+}
+
+function describeFatigueFeeling(fatigueValue) {
+  const value = clamp(fatigueValue, 0, 100)
+  if (value < 25) return 'energised'
+  if (value < 50) return 'focused'
+  if (value < 75) return 'wearied'
+  return 'exhausted'
+}
+
+function summariseLogHighlights(entries, limit = 3) {
+  if (!Array.isArray(entries) || !entries.length) {
+    return 'No new updates logged during this interval.'
+  }
+  const highlights = []
+  for (const entry of entries) {
+    if (!entry || entry.type === 'reflection') continue
+    const name = entry.author ? entry.author.split(' ')[0] : 'Crew'
+    const text = typeof entry.transcript === 'string' ? entry.transcript.trim() : ''
+    if (!text) continue
+    const truncated = text.length > 160 ? `${text.slice(0, 157)}…` : text
+    highlights.push(`${name}: ${truncated}`)
+    if (highlights.length >= limit) break
+  }
+  if (!highlights.length) {
+    return 'Quiet minute with no additional reports.'
+  }
+  return highlights.join(' | ')
 }
 
 function createInitialMetrics(member) {
@@ -639,11 +673,16 @@ function CrewBriefingOverlay({
   )
 }
 
-function ShipLog({ entries }) {
+function ShipLog({ entries, onDownload }) {
   if (!entries.length) {
     return (
       <section className="ship-log" aria-label="Crew exchanges">
-        <h2>Coordinated Thoughts</h2>
+        <header className="ship-log__header">
+          <h2>Coordinated Thoughts</h2>
+          <button type="button" onClick={onDownload} disabled>
+            Download log
+          </button>
+        </header>
         <div className="ship-log__empty">Crew transcripts will populate once the mission begins.</div>
       </section>
     )
@@ -651,7 +690,12 @@ function ShipLog({ entries }) {
 
   return (
     <section className="ship-log" aria-label="Crew exchanges">
-      <h2>Coordinated Thoughts</h2>
+      <header className="ship-log__header">
+        <h2>Coordinated Thoughts</h2>
+        <button type="button" onClick={onDownload}>
+          Download log
+        </button>
+      </header>
       <ul>
         {entries.map((entry) => (
           <li key={entry.id} className="ship-log__entry">
@@ -671,6 +715,140 @@ function ShipLog({ entries }) {
         ))}
       </ul>
     </section>
+  )
+}
+
+function MissionCompletionPanel({ isComplete, onOpenLog, isStoryLoading, storyError, entryCount }) {
+  if (!isComplete) return null
+  return (
+    <section className="mission-complete-panel" aria-live="polite">
+      <button type="button" className="mission-complete-panel__status" disabled>
+        Mission accomplished
+      </button>
+      <button type="button" className="mission-complete-panel__review" onClick={onOpenLog}>
+        Review ship&apos;s log
+      </button>
+      <p className="mission-complete-panel__story-status">
+        {isStoryLoading
+          ? 'Compiling voyage story…'
+          : storyError
+            ? storyError
+            : `${entryCount} log entries captured.`}
+      </p>
+    </section>
+  )
+}
+
+function ShipLogOverlay({ entries, story, isLoading, storyError, onClose, onDownload }) {
+  const orderedEntries = useMemo(() => entries.slice().reverse(), [entries])
+
+  const renderStory = () => {
+    if (isLoading) {
+      return <p className="ship-log-overlay__status">Compiling story…</p>
+    }
+    if (storyError) {
+      return <p className="ship-log-overlay__status ship-log-overlay__status--error">{storyError}</p>
+    }
+    if (!story) {
+      return <p className="ship-log-overlay__status">No story available yet.</p>
+    }
+    return story
+      .split('\n\n')
+      .filter(Boolean)
+      .map((paragraph, index) => <p key={`story-${index}`}>{paragraph}</p>)
+  }
+
+  const renderConversation = (entry) => {
+    if (!Array.isArray(entry.conversation) || !entry.conversation.length) return null
+    return (
+      <details className="ship-log-overlay__conversation">
+        <summary>Conversation context</summary>
+        <ul>
+          {entry.conversation.map((segment, index) => (
+            <li key={`${entry.id}-conv-${index}`}>
+              <strong>
+                {segment.role
+                  ? segment.role
+                      .toString()
+                      .split(' ')
+                      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+                      .join(' ')
+                  : 'Crew'}:
+              </strong>{' '}
+              {segment.content}
+            </li>
+          ))}
+        </ul>
+      </details>
+    )
+  }
+
+  const formatTimestamp = (value) => {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return 'Unknown time'
+    return date.toLocaleString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+      month: 'short',
+      day: '2-digit',
+    })
+  }
+
+  return (
+    <div className="ship-log-overlay" role="dialog" aria-modal="true" aria-label="Ship's log narrative">
+      <div className="ship-log-overlay__content">
+        <header className="ship-log-overlay__header">
+          <div>
+            <h2>Ship&apos;s Log Chronicle</h2>
+            <p>Review the full mission timeline and recorded reasoning.</p>
+          </div>
+          <div className="ship-log-overlay__actions">
+            <button type="button" onClick={onDownload}>
+              Download log
+            </button>
+            <button type="button" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </header>
+        <section className="ship-log-overlay__story" aria-label="Mission story">
+          <h3>Mission Story</h3>
+          {renderStory()}
+        </section>
+        <section className="ship-log-overlay__timeline" aria-label="Detailed ship log">
+          <h3>Mission Timeline</h3>
+          {orderedEntries.length ? (
+            <ol>
+              {orderedEntries.map((entry) => (
+                <li key={entry.id} className="ship-log-overlay__entry">
+                  <header>
+                    <span className="ship-log-overlay__entry-time">{formatTimestamp(entry.timestamp)}</span>
+                    <span className="ship-log-overlay__entry-author">{entry.author}</span>
+                    {entry.role ? <span className="ship-log-overlay__entry-role">{entry.role}</span> : null}
+                    <span className={`ship-log-overlay__entry-type ship-log-overlay__entry-type--${entry.type}`}>
+                      {entry.type}
+                    </span>
+                  </header>
+                  <p>{entry.transcript}</p>
+                  {Array.isArray(entry.chainOfThought) && entry.chainOfThought.length ? (
+                    <ul>
+                      {entry.chainOfThought.map((thought, index) => (
+                        <li key={`${entry.id}-thought-${index}`}>{thought}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {renderConversation(entry)}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="ship-log-overlay__status">No log entries have been recorded yet.</p>
+          )}
+        </section>
+      </div>
+    </div>
   )
 }
 
@@ -1178,6 +1356,14 @@ function App() {
   const crewHeartbeatIndexRef = useRef(0)
   const latestTelemetryRef = useRef({ progress: 0, elapsedMs: 0 })
   const lastElapsedRef = useRef(0)
+  const missionCompleteRef = useRef(false)
+  const reflectionMinuteRef = useRef(-1)
+  const [isMissionComplete, setIsMissionComplete] = useState(false)
+  const [missionStory, setMissionStory] = useState('')
+  const [missionStoryEntryCount, setMissionStoryEntryCount] = useState(0)
+  const [isLogOverlayOpen, setIsLogOverlayOpen] = useState(false)
+  const [isStoryLoading, setIsStoryLoading] = useState(false)
+  const [storyError, setStoryError] = useState(null)
 
   const currentRoute = useMemo(() => {
     if (!origin || !destination) return null
@@ -1187,7 +1373,35 @@ function App() {
   const routeKey = currentRoute ? `${currentRoute.origin}-${currentRoute.destination}` : 'none'
 
   const pushLogEntry = useCallback((entry) => {
-    setLogEntries((entries) => [entry, ...entries])
+    if (!entry) return null
+    const persistedByBackend = Boolean(entry.persistedByBackend)
+    const chain = Array.isArray(entry.chainOfThought)
+      ? entry.chainOfThought
+      : Array.isArray(entry.chain_of_thought)
+        ? entry.chain_of_thought
+        : []
+    const normalized = {
+      ...entry,
+      id: entry.id ?? createId('log'),
+      timestamp: entry.timestamp ?? new Date().toISOString(),
+      chainOfThought: chain,
+    }
+    delete normalized.chain_of_thought
+    delete normalized.persistedByBackend
+    setLogEntries((entries) => [normalized, ...entries])
+    if (!persistedByBackend) {
+      const backendPayload = { ...normalized }
+      if (!Array.isArray(backendPayload.conversation)) {
+        delete backendPayload.conversation
+      }
+      if (backendPayload.metadata == null) {
+        delete backendPayload.metadata
+      }
+      void recordShipLogEntry(backendPayload).catch((error) => {
+        console.warn('Unable to persist ship log entry:', error)
+      })
+    }
+    return normalized
   }, [])
 
   const triggerMissionFailure = useCallback(
@@ -1206,6 +1420,7 @@ function App() {
         transcript: `${reason}: ${narrative}`,
         chainOfThought: [],
         timestamp,
+        metadata: { category: 'failure', reason, narrative },
       })
     },
     [pushLogEntry],
@@ -1221,6 +1436,20 @@ function App() {
     },
     [pushLogEntry],
   )
+
+  const handleDownloadLog = useCallback(() => {
+    downloadShipLog().catch((error) => {
+      console.warn('Unable to download ship log:', error)
+    })
+  }, [])
+
+  const handleOpenLogOverlay = useCallback(() => {
+    setIsLogOverlayOpen(true)
+  }, [])
+
+  const handleCloseLogOverlay = useCallback(() => {
+    setIsLogOverlayOpen(false)
+  }, [])
 
   const updateHelmState = useCallback(
     (deltaMs, progressValue) => {
@@ -1336,6 +1565,14 @@ function App() {
       setIsPaused(true)
       setTriggeredMilestones([])
       setLogEntries([])
+      missionCompleteRef.current = false
+      reflectionMinuteRef.current = -1
+      setIsMissionComplete(false)
+      setMissionStory('')
+      setMissionStoryEntryCount(0)
+      setIsLogOverlayOpen(false)
+      setIsStoryLoading(false)
+      setStoryError(null)
       setHasLaunched(false)
       setObstacles([])
       setIsMapCollapsed(false)
@@ -1356,6 +1593,9 @@ function App() {
       })
       previousRouteKeyRef.current = routeKey
       setPeakTeamStress(0)
+      resetShipLog().catch((error) => {
+        console.warn('Unable to reset backend ship log after route change:', error)
+      })
     }
   }, [routeKey, crewState])
 
@@ -1550,6 +1790,7 @@ function App() {
           ...buildStressNotes('engineer'),
         ],
         timestamp: new Date().toISOString(),
+        metadata: { category: 'obstacle', type: obstacle.type, stage: 'cleared' },
       })
       const cleanupId = setTimeout(() => {
         setObstacles((current) => current.filter((item) => item.id !== obstacle.id))
@@ -1565,15 +1806,15 @@ function App() {
       if (progress >= milestone.ratio && !triggeredMilestones.includes(milestone.id)) {
         setTriggeredMilestones((state) => [...state, milestone.id])
         const timestamp = new Date().toISOString()
-        const systemEntry = {
+        pushLogEntry({
           id: createId('log'),
           type: 'system',
           author: 'Mission Control',
           transcript: `${milestone.label}: ${milestone.description}`,
           chainOfThought: [],
           timestamp,
-        }
-        setLogEntries((entries) => [systemEntry, ...entries])
+          metadata: { category: 'milestone', milestoneId: milestone.id, milestoneLabel: milestone.label },
+        })
 
         milestone.focusRoles.forEach(async (crewId) => {
           const crewMember = crewState.find((member) => member.id === crewId)
@@ -1593,19 +1834,25 @@ function App() {
             crewMetrics: crewMetricsRef.current[crewId],
             aggregateStress: aggregateTeamStress,
           })
-          setLogEntries((entries) => [
-            {
-              id: createId('log'),
-              type: 'crew',
-              author: crewMember.name,
-              role: crewMember.role,
-              transcript: thought.transcript,
-              chainOfThought: [...thought.chainOfThought, ...buildStressNotes(crewId)],
-              provider: thought.provider,
-              timestamp: new Date().toISOString(),
+          const entryTimestamp = new Date().toISOString()
+          pushLogEntry({
+            id: thought.logEntryId ?? createId('log'),
+            type: 'crew',
+            author: crewMember.name,
+            role: crewMember.role,
+            transcript: thought.transcript,
+            chainOfThought: [...thought.chainOfThought, ...buildStressNotes(crewId)],
+            provider: thought.provider,
+            conversation: thought.conversation,
+            metadata: {
+              category: 'crew-thought',
+              crewId,
+              milestoneId: milestone.id,
+              routeId: currentRoute.id,
             },
-            ...entries,
-          ])
+            timestamp: entryTimestamp,
+            persistedByBackend: Boolean(thought.logEntryId),
+          })
         })
       }
     })
@@ -1621,22 +1868,36 @@ function App() {
   ])
 
   useEffect(() => {
-    if (progress >= 1 && isRunning) {
-      setIsRunning(false)
-      setIsPaused(true)
-      setLogEntries((entries) => [
-        {
-          id: createId('log'),
-          type: 'system',
-          author: 'Mission Control',
-          transcript: 'Destination secured. Cable landing verification complete.',
-          chainOfThought: [],
-          timestamp: new Date().toISOString(),
-        },
-        ...entries,
-      ])
-    }
-  }, [progress, isRunning])
+    if (progress < 1) return
+    if (missionCompleteRef.current) return
+    missionCompleteRef.current = true
+    setIsRunning(false)
+    setIsPaused(true)
+    setIsMissionComplete(true)
+    pushLogEntry({
+      id: createId('log'),
+      type: 'system',
+      author: 'Mission Control',
+      transcript: 'Destination secured. Cable landing verification complete.',
+      chainOfThought: [],
+      timestamp: new Date().toISOString(),
+      metadata: { category: 'mission', stage: 'complete', routeId: currentRoute?.id },
+    })
+    setIsStoryLoading(true)
+    setStoryError(null)
+    fetchShipLogStory()
+      .then((data) => {
+        setMissionStory(data.story)
+        setMissionStoryEntryCount(data.entryCount)
+      })
+      .catch((error) => {
+        console.warn('Unable to build ship log story:', error)
+        setStoryError(error.message ?? 'Unable to compile the ship log narrative.')
+      })
+      .finally(() => {
+        setIsStoryLoading(false)
+      })
+  }, [progress, pushLogEntry, currentRoute])
 
   const updateCrewMetrics = useCallback(
     (deltaMs) => {
@@ -1698,6 +1959,44 @@ function App() {
   }, [elapsedMs, updateCrewMetrics])
 
   useEffect(() => {
+    if (!isRunning || isPaused) return
+    const minuteMark = Math.floor(elapsedMs / 60000)
+    if (minuteMark <= 0) return
+    if (minuteMark <= reflectionMinuteRef.current) return
+    const telemetry = latestTelemetryRef.current
+    const digest = summariseLogHighlights(logEntries)
+    for (let minute = Math.max(1, reflectionMinuteRef.current + 1); minute <= minuteMark; minute += 1) {
+      crewState.forEach((crewMember) => {
+        const metrics = crewMetricsRef.current[crewMember.id]
+        const stressValue = metrics?.stress ?? 0
+        const fatigueValue = metrics?.fatigue ?? 0
+        const stressInfo = describeStressLevel(stressValue)
+        const transcript = `${crewMember.name}: Minute ${minute} reflection — feeling ${stressInfo.tone} and ${describeFatigueFeeling(fatigueValue)}.`
+        const chain = [
+          `Shared log digest: ${digest}`,
+          `Stress ${Math.round(stressValue)}% · Fatigue ${Math.round(fatigueValue)}%.`,
+          describeHeadingForThought(telemetry),
+          metrics
+            ? `${metrics.awakeUnits} on duty, ${metrics.restingUnits} resting.`
+            : 'Monitoring team readiness from central command.',
+          stressInfo.narrative,
+        ].filter(Boolean)
+        pushLogEntry({
+          id: createId('log'),
+          type: 'reflection',
+          author: crewMember.name,
+          role: crewMember.role,
+          transcript,
+          chainOfThought: chain,
+          timestamp: new Date().toISOString(),
+          metadata: { category: 'reflection', minuteMark: minute, crewId: crewMember.id },
+        })
+      })
+    }
+    reflectionMinuteRef.current = minuteMark
+  }, [elapsedMs, isRunning, isPaused, crewState, logEntries, pushLogEntry])
+
+  useEffect(() => {
     if (!isRunning || isPaused) {
       if (heartbeatIntervalRef.current) {
         clearInterval(heartbeatIntervalRef.current)
@@ -1734,21 +2033,38 @@ function App() {
 
   const canStart = Boolean(currentRoute) && !isRunning
 
-  const handleStart = () => {
+  const handleStart = async () => {
     if (!currentRoute) return
+    missionCompleteRef.current = false
+    reflectionMinuteRef.current = -1
+    setIsMissionComplete(false)
+    setMissionStory('')
+    setMissionStoryEntryCount(0)
+    setIsLogOverlayOpen(false)
+    setStoryError(null)
     setProgress(0)
     setElapsedMs(0)
     setTriggeredMilestones([])
-    setLogEntries([
-      {
-        id: createId('log'),
-        type: 'system',
-        author: 'Mission Control',
-        transcript: `Voyage initiated from ${resolvePort(currentRoute.origin).name} to ${resolvePort(currentRoute.destination).name}.`,
-        chainOfThought: [],
-        timestamp: new Date().toISOString(),
+    setLogEntries([])
+    try {
+      await resetShipLog()
+    } catch (error) {
+      console.warn('Unable to clear backend ship log before launch:', error)
+    }
+    pushLogEntry({
+      id: createId('log'),
+      type: 'system',
+      author: 'Mission Control',
+      transcript: `Voyage initiated from ${resolvePort(currentRoute.origin).name} to ${resolvePort(currentRoute.destination).name}.`,
+      chainOfThought: [],
+      timestamp: new Date().toISOString(),
+      metadata: {
+        category: 'mission',
+        stage: 'launch',
+        routeId: currentRoute.id,
+        routeName: currentRoute.name,
       },
-    ])
+    })
     setIsRunning(true)
     setIsPaused(false)
     setHasLaunched(true)
@@ -1781,12 +2097,20 @@ function App() {
   }
 
   const handleRestart = () => {
+    missionCompleteRef.current = false
+    reflectionMinuteRef.current = -1
     setProgress(0)
     setElapsedMs(0)
     setIsRunning(false)
     setIsPaused(true)
     setTriggeredMilestones([])
     setLogEntries([])
+    setIsMissionComplete(false)
+    setMissionStory('')
+    setMissionStoryEntryCount(0)
+    setIsLogOverlayOpen(false)
+    setIsStoryLoading(false)
+    setStoryError(null)
     setHasLaunched(false)
     setObstacles([])
     setMissionFailure(null)
@@ -1814,6 +2138,9 @@ function App() {
         initial[member.id] = createInitialMetrics(member)
       })
       return initial
+    })
+    resetShipLog().catch((error) => {
+      console.warn('Unable to reset backend ship log during restart:', error)
     })
   }
 
@@ -1865,6 +2192,7 @@ function App() {
         transcript: `${config.label}: ${config.description}`,
         chainOfThought: [],
         timestamp,
+        metadata: { category: 'obstacle', type, stage: 'detected' },
       })
       adjustCrewStress(['intel', 'captain', 'operations', 'navigator', 'engineer'], 9, 3)
       scheduleLogEntry(400, () => ({
@@ -1880,6 +2208,7 @@ function App() {
           ...buildStressNotes('intel'),
         ],
         timestamp: new Date().toISOString(),
+        metadata: { category: 'obstacle', type, stage: 'analysis' },
       }))
       scheduleLogEntry(950, () => ({
         id: createId('log'),
@@ -1894,6 +2223,7 @@ function App() {
           ...buildStressNotes('captain'),
         ],
         timestamp: new Date().toISOString(),
+        metadata: { category: 'obstacle', type, stage: 'command' },
       }))
       scheduleLogEntry(1500, () => ({
         id: createId('log'),
@@ -1908,6 +2238,7 @@ function App() {
           ...buildStressNotes('operations'),
         ],
         timestamp: new Date().toISOString(),
+        metadata: { category: 'obstacle', type, stage: 'operations' },
       }))
       scheduleLogEntry(2000, () => ({
         id: createId('log'),
@@ -1922,6 +2253,7 @@ function App() {
           ...buildStressNotes('navigator'),
         ],
         timestamp: new Date().toISOString(),
+        metadata: { category: 'obstacle', type, stage: 'navigation' },
       }))
     },
     [currentRoute, progress, pushLogEntry, scheduleLogEntry, adjustCrewStress, buildStressNotes],
@@ -2130,8 +2462,15 @@ function App() {
             timeScaleMin={TIME_SCALE_MIN}
             timeScaleMax={TIME_SCALE_MAX}
           />
+          <MissionCompletionPanel
+            isComplete={isMissionComplete}
+            onOpenLog={handleOpenLogOverlay}
+            isStoryLoading={isStoryLoading}
+            storyError={storyError}
+            entryCount={missionStoryEntryCount}
+          />
         </div>
-        <ShipLog entries={logEntries} />
+        <ShipLog entries={logEntries} onDownload={handleDownloadLog} />
         <MapViewport
           route={currentRoute}
           progress={progress}
@@ -2163,6 +2502,16 @@ function App() {
           onUpdateUnits={updateUnits}
           canModifyStaffing={!hasLaunched}
           resourceStats={resourceStats}
+        />
+      ) : null}
+      {isLogOverlayOpen ? (
+        <ShipLogOverlay
+          entries={logEntries}
+          story={missionStory}
+          isLoading={isStoryLoading}
+          storyError={storyError}
+          onClose={handleCloseLogOverlay}
+          onDownload={handleDownloadLog}
         />
       ) : null}
     </div>
